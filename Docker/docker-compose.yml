@@ -1,6 +1,22 @@
-version: '3.8'
+version: "3.8"
 
 services:
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: pass
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    networks:
+      - monitoring
+
   prometheus:
     image: prom/prometheus:latest
     container_name: prometheus
@@ -12,16 +28,16 @@ services:
     restart: unless-stopped
     networks:
       - monitoring
-      
+
   grafana:
     image: grafana/grafana:latest
     container_name: grafana
     user: "472"
+    ports:
+      - "4000:3000"
     volumes:
       - grafana_data:/var/lib/grafana
       - ./grafana/provisioning:/etc/grafana/provisioning
-    ports:
-      - "4000:3000"
     restart: unless-stopped
     networks:
       - monitoring
@@ -36,7 +52,6 @@ services:
             access: proxy
             url: http://prometheus:9090
             isDefault: true
-            editable: true
         ' > /etc/grafana/provisioning/datasources/datasource.yml && \
         /run.sh
       "
@@ -59,6 +74,11 @@ services:
       - "9200:9200"
     networks:
       - monitoring
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   kibana:
     image: docker.elastic.co/kibana/kibana:8.12.2
@@ -70,7 +90,8 @@ services:
     ports:
       - "5601:5601"
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
     networks:
       - monitoring
 
@@ -81,8 +102,27 @@ services:
       - ./logstash/logstash.conf:/usr/share/logstash/pipeline/logstash.conf
     ports:
       - "5000:5000"
+      - "9600:9600"
     depends_on:
-      - elasticsearch
+      elasticsearch:
+        condition: service_healthy
+    environment:
+      - QUEUE_TYPE=persisted
+    networks:
+      - monitoring
+
+  minio:
+    image: quay.io/minio/minio:latest
+    container_name: minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio12345
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
     networks:
       - monitoring
 
@@ -108,37 +148,20 @@ services:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_INTERNAL:PLAINTEXT
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
       KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,PLAINTEXT_INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,PLAINTEXT_INTERNAL://kafka:29092
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
-    networks:
-      - monitoring
-
-  kafka-init:
-    image: confluentinc/cp-kafka:7.6.0
-    container_name: kafka-init
-    depends_on:
-      - kafka
-    entrypoint: ["/bin/sh", "-c"]
-    command: >
-      "
-      sleep 10 &&
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic confirmation_topic --replication-factor 1 --partitions 1 &&
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic notification_topic --replication-factor 1 --partitions 1 &&
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic deleted_users_user_to_main --replication-factor 1 --partitions 1 &&
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic deleted_users_main_to_user --replication-factor 1 --partitions 1 &&
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic project_update_notification_m2s --replication-factor 1 --partitions 1 &&
-      kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic project_update_notification_s2n --replication-factor 1 --partitions 1 
-      "
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
     networks:
       - monitoring
 
 volumes:
+  postgres_data:
   prometheus_data:
   grafana_data:
   elasticsearch_data:
   kibana_data:
+  minio_data:
 
 networks:
   monitoring:
